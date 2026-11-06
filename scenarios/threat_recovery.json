@@ -1,0 +1,14 @@
+{
+  "name": "threat_recovery",
+  "description": "A threat causes capped fear that fades faster than other emotions; petting then helps recovery.",
+  "personality": "pet",
+  "duration_s": 60.0,
+  "events": [
+    {"t": 3.0, "event": "threat"},
+    {"t": 20.0, "event": "pet"}
+  ],
+  "expect": [
+    {"t": 3.5, "label": "fear", "cause": "a threat"},
+    {"t": 55.0, "label": "neutral"}
+  ]
+}

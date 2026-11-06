@@ -1,0 +1,15 @@
+{
+  "name": "shy_scolded",
+  "description": "Repeated scolding leaves a shy robot sad, and its mood stays low after the emotion has faded.",
+  "personality": "shy",
+  "tau_mood": 60.0,
+  "duration_s": 90.0,
+  "events": [
+    {"t": 2.0, "event": "scold"},
+    {"t": 6.0, "event": "scold"},
+    {"t": 10.0, "event": "scold"}
+  ],
+  "expect": [
+    {"t": 11.0, "label": "sadness", "cause": "you scolded it"}
+  ]
+}

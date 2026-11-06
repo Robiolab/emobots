@@ -1,0 +1,14 @@
+{
+  "name": "grumpy_insult",
+  "description": "An unfair insult angers a grumpy robot, within the safety cap; praise then pulls it back.",
+  "personality": "grumpy",
+  "duration_s": 60.0,
+  "events": [
+    {"t": 2.0, "event": "insult"},
+    {"t": 15.0, "event": "praise"}
+  ],
+  "expect": [
+    {"t": 2.5, "label": "anger", "cause": "an unfair insult"},
+    {"t": 55.0, "label": "neutral"}
+  ]
+}

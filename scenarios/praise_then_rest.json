@@ -1,0 +1,12 @@
+{
+  "name": "praise_then_rest",
+  "description": "One praise makes the pet joyful, then it settles back to neutral with the cause still logged while the effect lasts.",
+  "personality": "pet",
+  "duration_s": 60.0,
+  "events": [{"t": 5.0, "event": "praise"}],
+  "expect": [
+    {"t": 4.5, "label": "neutral"},
+    {"t": 5.5, "label": "joy", "cause": "you praised it"},
+    {"t": 55.0, "label": "neutral"}
+  ]
+}

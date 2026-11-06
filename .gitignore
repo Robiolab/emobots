@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+# Session logs can hold participant speech once Phase 1 lands: never commit them.
+logs/
+# Downloaded speech models.
+models/

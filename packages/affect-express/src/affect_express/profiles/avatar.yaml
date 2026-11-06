@@ -1,0 +1,73 @@
+# On-screen face. All channels are normalised; nothing here has a physical limit.
+name: avatar
+ttl_s: 0.5
+channels:
+  face.eye_open:
+    limits: [0.0, 1.0]
+    rest: 0.55
+    rate_limit: 6.0
+    pad: {arousal: 0.3}
+    labels: {fear: 0.35, surprise: 0.35, sadness: -0.1, sleepy: -0.2}
+  face.brow_raise:
+    limits: [-1.0, 1.0]
+    rest: 0.0
+    rate_limit: 5.0
+    pad: {arousal: 0.25}
+    labels: {fear: 0.5, surprise: 0.7, anger: -0.7, sadness: 0.2}
+  face.brow_tilt: # positive raises the inner ends (worry), negative lowers them (anger)
+    limits: [-1.0, 1.0]
+    rest: 0.0
+    rate_limit: 4.0
+    labels: {sadness: 0.9, fear: 0.7, anger: -1.0}
+  face.mouth_curve:
+    limits: [-1.0, 1.0]
+    rest: 0.1
+    rate_limit: 4.0
+    pad: {pleasure: 0.9}
+  face.mouth_open:
+    limits: [0.0, 1.0]
+    rest: 0.0
+    rate_limit: 14.0
+    labels: {surprise: 0.6, fear: 0.2}
+    curve: {axis: arousal, points: [[-1.0, 0.0], [0.4, 0.0], [1.0, 0.25]]}
+    talking: {amplitude: 0.6, freq_hz: 3.5}
+  face.blink_rate: # blinks per second
+    limits: [0.05, 1.0]
+    rest: 0.3
+    rate_limit: 2.0
+    pad: {arousal: 0.2}
+    labels: {joy: 0.25}
+  gaze.direct: # 1 looks straight at the person
+    limits: [0.0, 1.0]
+    rest: 0.75
+    rate_limit: 3.0
+    pad: {dominance: 0.3}
+    labels: {sadness: -0.3, fear: -0.3}
+    idle: {amplitude: 0.05, freq_hz: 0.15}
+  head.pitch: # positive looks down
+    limits: [-1.0, 1.0]
+    rest: 0.0
+    rate_limit: 6.0
+    pad: {dominance: -0.15}
+    labels: {sadness: 0.45}
+    idle: {amplitude: 0.03, freq_hz: 0.25}
+  body.bounce:
+    limits: [0.0, 1.0]
+    rest: 0.1
+    rate_limit: 4.0
+    pad: {arousal: 0.25, pleasure: 0.2}
+    labels: {joy: 0.4, sadness: -0.1}
+cues:
+  nod:
+    - {channel: head.pitch, amplitude: 0.45, duration_s: 0.6, cycles: 2}
+  listen:
+    - {channel: gaze.direct, amplitude: 0.2, duration_s: 0.8}
+    - {channel: face.brow_raise, amplitude: 0.15, duration_s: 0.5}
+  think:
+    - {channel: gaze.direct, amplitude: -0.35, duration_s: 1.2}
+    - {channel: head.pitch, amplitude: -0.15, duration_s: 1.2}
+  laugh:
+    - {channel: body.bounce, amplitude: 0.5, duration_s: 0.9, cycles: 3}
+    - {channel: face.mouth_open, amplitude: 0.6, duration_s: 0.9, cycles: 3}
+  shake:
+    - {channel: gaze.direct, amplitude: -0.25, duration_s: 0.7, cycles: 2}

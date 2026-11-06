@@ -1,0 +1,22 @@
+[project]
+name = "affect-adapters"
+version = "0.1.0"
+description = "Robot adapters. Each enforces its own robot's limits and may refuse a command."
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = ["affect-core", "affect-express", "pyyaml>=6"]
+
+[project.entry-points."affect.adapters"]
+avatar = "affect_adapters:AvatarAdapter"
+simulator = "affect_adapters:SimulatorAdapter"
+
+[tool.uv.sources]
+affect-core = { workspace = true }
+affect-express = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/affect_adapters"]

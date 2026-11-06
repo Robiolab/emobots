@@ -1,0 +1,32 @@
+[project]
+name = "affect-server"
+version = "0.1.0"
+description = "HTTP and WebSocket API around the affect core, for non-ROS robots and the dashboard."
+requires-python = ">=3.11"
+license = "Apache-2.0"
+dependencies = [
+    "affect-core",
+    "affect-dash",
+    "affect-express",
+    "affect-adapters",
+    "affect-dialogue",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+]
+
+[project.scripts]
+affect-server = "affect_server.__main__:main"
+
+[tool.uv.sources]
+affect-core = { workspace = true }
+affect-dash = { workspace = true }
+affect-express = { workspace = true }
+affect-adapters = { workspace = true }
+affect-dialogue = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/affect_server"]

@@ -1,0 +1,33 @@
+# Robotic hand. Not one of the two robots in the Phase 2 gate; kept as a third
+# embodiment, to check the mapping stays general.
+name: hand
+ttl_s: 0.2
+channels:
+  finger.curl: # 0 is an open palm, 1 is a closed fist
+    limits: [0.0, 0.9]
+    rest: 0.3
+    rate_limit: 1.5
+    pad: {pleasure: -0.15}
+    labels: {joy: -0.15, sadness: 0.3, fear: 0.4}
+    idle: {amplitude: 0.01, freq_hz: 0.25}
+  gesture.speed: # multiple of nominal speed
+    limits: [0.4, 1.5]
+    rest: 1.0
+    rate_limit: 1.0
+    pad: {arousal: 0.3}
+    labels: {joy: 0.2, sadness: -0.4, fear: 0.3}
+  grip.compliance: # 1 is soft
+    limits: [0.2, 1.0]
+    rest: 0.7
+    rate_limit: 1.0
+    pad: {arousal: -0.1}
+    labels: {joy: 0.1, fear: -0.4, anger: -0.3}
+cues:
+  nod:
+    - {channel: finger.curl, amplitude: 0.2, duration_s: 0.6, cycles: 2}
+  listen:
+    - {channel: finger.curl, amplitude: -0.05, duration_s: 0.8}
+  think:
+    - {channel: finger.curl, amplitude: 0.05, duration_s: 1.2}
+  withdraw:
+    - {channel: finger.curl, amplitude: 0.3, duration_s: 0.5}

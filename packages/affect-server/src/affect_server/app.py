@@ -12,7 +12,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from affect_adapters import AvatarAdapter, SimulatorAdapter
 from affect_core import (
     CATALOG,
@@ -29,7 +28,7 @@ from affect_dash import STATIC_DIR
 from affect_dialogue.conversation import Conversation, latency_summary
 from affect_dialogue.runtime import load_backend
 from affect_express import ExpressionLoop, ExpressionMapper, load_profile
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -41,12 +40,15 @@ RECENT_EVENTS = 50
 RECENT_TALK = 40
 CLIENT_QUEUE = 256
 TALK_KINDS = ("heard", "reply", "llm_error", "interrupted")
-LISTEN_RATE = 16000  # the button records 16-bit mono PCM at this rate
-LISTEN_MIN_S = 0.2
-LISTEN_MAX_S = 60.0
 # While an arm movement plays, the emotion's time constant is this fraction of the mood's,
 # which is slow enough that the emotion stays put for the length of the movement.
 HOLD_TAU_FRACTION = 0.9
+
+
+class ListeningRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    on: bool
 
 
 class SayRequest(BaseModel):
@@ -65,42 +67,6 @@ class PersonalityUpdate(BaseModel):
     gain: float | None = Field(default=None, gt=0.0)
     tau_emotion: float | None = Field(default=None, gt=0.0)
     tau_mood: float | None = Field(default=None, gt=0.0)
-
-
-class ServerRecorder:
-    """Records this machine's own microphone between two button presses.
-
-    The browser would have to ask permission for the microphone; on one machine the
-    server can open the sound device directly, so the dashboard's button needs nothing.
-    """
-
-    def __init__(self, device: Any = None) -> None:
-        self.device = device
-        self._stream: Any = None
-        self._chunks: list[np.ndarray] = []
-
-    @property
-    def recording(self) -> bool:
-        return self._stream is not None
-
-    def start(self) -> None:
-        import sounddevice as sd
-
-        self._chunks = []
-        self._stream = sd.InputStream(
-            samplerate=LISTEN_RATE,
-            channels=1,
-            dtype="float32",
-            device=self.device,
-            callback=lambda data, frames, time_info, status: self._chunks.append(data[:, 0].copy()),
-        )
-        self._stream.start()
-
-    def stop(self) -> np.ndarray:
-        stream, self._stream = self._stream, None
-        stream.stop()
-        stream.close()
-        return np.concatenate(self._chunks) if self._chunks else np.zeros(0, dtype=np.float32)
 
 
 class EngineHost:
@@ -123,10 +89,9 @@ class EngineHost:
         self.turns: list[dict[str, Any]] = []
         self.conversation: Conversation | None = None
         self.microphone: Any = None
-        self.recorder: ServerRecorder | None = None
+        self.microphone_factory: Callable[[Conversation], Any] | None = None
         self.motion: MotionPlayer | None = None
         self._armed = True  # a new emotion, or a new event, may start one movement
-        self._last_label = self.engine.state.label
         self._held_from: Personality | None = None  # the personality to go back to
         self._quiet_personality = 0  # holds are internal: the dashboard need not see them
         self._release_at = 0.0
@@ -199,7 +164,7 @@ class EngineHost:
             "latency": latency_summary(self.turns),
             "voice": self.conversation is not None and self.conversation.stt is not None,
             "mic": self.microphone is not None,
-            "recorder": self.recorder is not None,
+            "can_listen": self.microphone_factory is not None,
             "motion": self.motion is not None,
             "acting": self._acting_now(),
         }
@@ -209,6 +174,23 @@ class EngineHost:
             return None
         remaining = max(0.0, self._acting["ends_at"] - self._clock())
         return {**{k: v for k, v in self._acting.items() if k != "ends_at"}, "remaining": remaining}
+
+    def set_listening(self, on: bool) -> bool:
+        """Switch the always-on microphone. Returns whether it is on afterwards."""
+        if self.microphone_factory is None or self.conversation is None:
+            raise RuntimeError("no speech: start the server with --speech")
+        if on and self.microphone is None:
+            microphone = self.microphone_factory(self.conversation)
+            microphone.start()
+            self.microphone = microphone
+        elif not on and self.microphone is not None:
+            self.microphone.close()
+            self.microphone = None
+            endpointer = self.conversation.endpointer
+            if endpointer is not None:
+                endpointer.reset()
+        self._broadcast({"type": "listening", "on": self.microphone is not None})
+        return self.microphone is not None
 
     @property
     def base_personality(self) -> Personality:
@@ -228,9 +210,6 @@ class EngineHost:
 
     def _drive_motion(self) -> None:
         state = self.engine.state
-        if state.label != self._last_label:
-            self._last_label = state.label
-            self._armed = True
         if self._held_from is not None:
             if not self.motion.playing and self._clock() >= self._release_at:
                 self._release_emotion()
@@ -270,7 +249,14 @@ class EngineHost:
         self._quiet_personality += 1
         self.engine.set_personality(base)
         self._acting = None
-        self.on_conversation("motion_end", {})
+        self.on_conversation(
+            "motion_end",
+            {
+                "error": self.motion.error,
+                "arm_errors": dict(getattr(self.motion.arm, "errors", {})),
+                "clamped": getattr(self.motion.arm, "clamped", 0),
+            },
+        )
 
     def stop_motion(self) -> None:
         """Abandon the movement and let the emotion decay again."""
@@ -333,7 +319,7 @@ def create_app(
     audio_device: Any = None,
     persona: str | None = None,
     stt: str = "whisper",
-    push_to_talk: bool = False,
+    listen: bool = False,
     motions: str | Path | None = None,
     arm: Any = None,
     motion_map: dict[str, str] | None = None,
@@ -349,10 +335,6 @@ def create_app(
         app.state.host = host
         parts = await _attach_speech(host, vad, voices, audio_device, stt) if speech else {}
         microphone_factory = parts.pop("microphone_factory", None)
-        if push_to_talk:  # the dashboard's record button is the only input
-            microphone_factory = None
-            if speech:
-                host.recorder = ServerRecorder(audio_device)
         options = {"persona": persona} if persona else {}
         host.conversation = Conversation(
             host.engine,
@@ -362,9 +344,9 @@ def create_app(
             **parts,
             **options,
         )
-        if microphone_factory is not None:
-            host.microphone = microphone_factory(host.conversation)
-            host.microphone.start()
+        host.microphone_factory = microphone_factory
+        if microphone_factory is not None and listen:
+            host.set_listening(True)
         if motions is not None:
             library = MotionLibrary(motions)
             if not library.counts():
@@ -382,6 +364,7 @@ def create_app(
             host.stop_motion()
             if host.microphone is not None:
                 host.microphone.close()
+                host.microphone = None
             await host.conversation.aclose()
             if hasattr(host.conversation.sink, "close"):
                 host.conversation.sink.close()
@@ -455,59 +438,13 @@ def create_app(
         conversation.say(request.text, request.language)
         return {"queued": True}
 
-    async def turn_from_audio(audio: np.ndarray, language: str | None) -> dict[str, Any]:
-        conversation = host_of().conversation
-        seconds = len(audio) / LISTEN_RATE
-        if seconds > LISTEN_MAX_S:
-            raise HTTPException(413, f"recording longer than {LISTEN_MAX_S:.0f} s")
-        if seconds < LISTEN_MIN_S:
-            raise HTTPException(422, "recording too short")
-        transcript = await asyncio.to_thread(conversation.stt.transcribe, audio, language)
-        text = transcript.text.strip()
-        if not text:
-            return {"text": "", "queued": False}
-        conversation.say(text, transcript.language)
-        return {"text": text, "language": transcript.language, "queued": True}
-
-    @app.post("/api/record/start")
-    async def record_start() -> dict[str, Any]:
-        """Start recording the server's microphone (the dashboard's record button)."""
-        recorder = host_of().recorder
-        if recorder is None:
-            raise HTTPException(409, "start the server with --speech --push-to-talk")
-        if recorder.recording:
-            raise HTTPException(409, "already recording")
+    @app.post("/api/listening")
+    async def listening(request: ListeningRequest) -> dict[str, Any]:
+        """Switch the microphone on or off, from the dashboard's Escuchar button."""
         try:
-            recorder.start()
-        except Exception as exc:  # no device, device busy
-            raise HTTPException(503, f"could not open the microphone: {exc}") from exc
-        return {"recording": True}
-
-    @app.post("/api/record/stop")
-    async def record_stop(
-        language: str | None = Query(None, pattern="^(es|en)$"),
-    ) -> dict[str, Any]:
-        """Stop recording, transcribe it, and run it as a turn."""
-        recorder = host_of().recorder
-        if recorder is None or not recorder.recording:
-            raise HTTPException(409, "not recording")
-        return await turn_from_audio(recorder.stop(), language)
-
-    @app.post("/api/listen")
-    async def listen(
-        request: Request, language: str | None = Query(None, pattern="^(es|en)$")
-    ) -> dict[str, Any]:
-        """A spoken turn from the dashboard's record button.
-
-        The body is 16 kHz mono 16-bit little-endian PCM. It is transcribed with the
-        server's STT backend, then runs through the same pipeline as a typed turn.
-        """
-        conversation = host_of().conversation
-        if conversation.stt is None:
-            raise HTTPException(409, "no speech recognition: start the server with --speech")
-        body = await request.body()
-        audio = np.frombuffer(body[: len(body) // 2 * 2], dtype="<i2").astype(np.float32) / 32768
-        return await turn_from_audio(audio, language)
+            return {"listening": host_of().set_listening(request.on)}
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/stop")
     async def stop() -> dict[str, Any]:
@@ -546,7 +483,8 @@ def create_app(
 
     @app.get("/")
     async def index() -> FileResponse:
-        return FileResponse(STATIC_DIR / "index.html")
+        # The dashboard changes with the code: make the browser ask again on every reload.
+        return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app

@@ -1003,3 +1003,48 @@ async def test_reported_first_word_includes_the_sound_hardware_delay():
     conversation, _, _ = make_conversation(tts=FakeTTS(), sink=Hardware(), clock=lambda: now[0])
     await conversation.say("hello", "en")
     assert conversation.timings[-1].report()["first_word_ms"] == pytest.approx(90.0)
+
+
+def test_onemin_llm_writes_the_turns_as_a_script_and_streams_the_tokens():
+    import asyncio
+    from types import SimpleNamespace
+
+    from affect_dialogue.llm import LLMError, OneMinLLM
+
+    calls = []
+
+    async def achat(prompt, model=None, stream=False):
+        calls.append((prompt, model, stream))
+
+        async def tokens():
+            for piece in ('{"cause":"x"}\n', "Hola", "."):
+                yield piece
+
+        return tokens()
+
+    llm = OneMinLLM(model="fast-model", client=SimpleNamespace(text=SimpleNamespace(achat=achat)))
+    history = [
+        {"role": "user", "content": "<heard lang=\"es\">hola</heard>"},
+        {"role": "assistant", "content": "Hola."},
+        {"role": "user", "content": "<affect>neutral</affect>\n<heard>¿qué tal?</heard>"},
+    ]
+
+    async def collect():
+        return [t async for t in llm.stream("SYSTEM RULES", history)]
+
+    assert "".join(asyncio.run(collect())) == '{"cause":"x"}\nHola.'
+    prompt, model, stream = calls[0]
+    assert model == "fast-model" and stream is True
+    assert prompt.startswith("SYSTEM RULES") and prompt.endswith("[Robot]")
+    assert prompt.index("[Person]") < prompt.index("[Robot]\nHola.") < prompt.rindex("[Person]")
+
+    async def broken(prompt, model=None, stream=False):
+        raise ConnectionError("down")
+
+    bad = OneMinLLM(client=SimpleNamespace(text=SimpleNamespace(achat=broken)))
+
+    async def fail():
+        return [t async for t in bad.stream("s", history)]
+
+    with pytest.raises(LLMError, match="1min.ai chat failed"):
+        asyncio.run(fail())

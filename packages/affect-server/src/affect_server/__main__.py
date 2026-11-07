@@ -25,9 +25,9 @@ def main() -> None:
     parser.add_argument("--speech", action="store_true", help="use the microphone and speaker")
     parser.add_argument("--stt", default="whisper", help="whisper (local, default) or onemin (API)")
     parser.add_argument(
-        "--push-to-talk",
+        "--listen",
         action="store_true",
-        help="with --speech: no always-on microphone; use the dashboard's record button",
+        help="with --speech: start with the microphone on (default: off until the button)",
     )
     parser.add_argument(
         "--motions", help="folder of arm recordings: play one for each emotion, holding it"
@@ -35,11 +35,15 @@ def main() -> None:
     parser.add_argument(
         "--arm", default="mock", choices=["mock", "real"], help="mock (default) or the real arm"
     )
-    parser.add_argument("--arm-port", default=DEFAULT_PORT, help="serial port of the real arm")
+    parser.add_argument(
+        "--arm-port",
+        default=DEFAULT_PORT,
+        help="serial port of the real arm; several, comma separated, move together",
+    )
     parser.add_argument("--arm-speed", type=int, default=DEFAULT_SPEED)
     parser.add_argument(
         "--motion-map",
-        default="joy=happy,sadness=sad,anger=angry,fear=disgust",
+        default="joy=happy,sadness=sad,anger=angry,fear=disgust,interest=any",
         help="engine label=recording type, comma separated",
     )
     parser.add_argument("--vad", default="silero", help="silero (default) or energy")
@@ -65,7 +69,7 @@ def main() -> None:
         llm_options=options,
         speech=args.speech,
         stt=args.stt,
-        push_to_talk=args.push_to_talk,
+        listen=args.listen,
         motions=args.motions,
         arm=arm,
         motion_map=parse_motion_map(args.motion_map),

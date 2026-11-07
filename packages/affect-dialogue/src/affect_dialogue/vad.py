@@ -151,6 +151,15 @@ class Endpointer:
         self._t_last_voice = 0.0
         self.in_speech = False
 
+    def reset(self) -> None:
+        """Forget any utterance in progress, for when the microphone is switched off."""
+        self._speech = []
+        self._voiced_run = 0
+        self._silent_run = 0
+        self.in_speech = False
+        self._preroll.clear()
+        self.vad.reset()
+
     def speech_duration(self, now: float) -> float:
         return now - self._t_start if self.in_speech else 0.0
 

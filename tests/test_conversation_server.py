@@ -112,3 +112,8 @@ def test_operator_stop_is_not_appraised_as_the_person_being_rude(tmp_path):
         log = c.get("/api/state").json()["log"]
     causes = [r["data"]["event"]["cause"] for r in read_log(log) if r["kind"] == "event"]
     assert not any("interrupted" in cause for cause in causes)
+
+
+def test_hello_says_whether_voice_and_the_microphone_are_on(client):
+    hello = client.get("/api/state").json()
+    assert hello["voice"] is False and hello["mic"] is False

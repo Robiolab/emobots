@@ -16,6 +16,7 @@ gpu = ["nvidia-cublas-cu12==12.9.2.10", "nvidia-cudnn-cu12==9.27.0.42"]
 scripted = "affect_dialogue.llm:ScriptedLLM"
 claude = "affect_dialogue.llm:ClaudeLLM"
 ollama = "affect_dialogue.llm:OllamaLLM"
+onemin = "affect_dialogue.llm:OneMinLLM"
 
 [project.entry-points."affect.stt"]
 whisper = "affect_dialogue.speech:WhisperSTT"

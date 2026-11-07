@@ -67,6 +67,49 @@ class ClaudeLLM:
             raise LLMError("could not reach the Claude API") from exc
 
 
+class OneMinLLM:
+    """Cloud backend through the 1min.ai chat API, which fronts many models.
+
+    The chat endpoint takes one prompt, not a system prompt plus turns, so the system
+    prompt and the recent turns are written out as a script the model continues. Sends
+    text only. Needs the `onemin` SDK and the ONEMIN_API_KEY environment variable.
+    """
+
+    def __init__(self, model: str = "gpt-4o-mini", client: Any = None) -> None:
+        if client is None:
+            try:
+                from onemin import AsyncOneMinClient
+            except ImportError as exc:
+                raise LLMError(
+                    "the onemin SDK is not installed; run with "
+                    "`uv run --with-editable <path to 1minai>/python ...`"
+                ) from exc
+            client = AsyncOneMinClient()
+        self._client = client
+        self.model = model
+
+    @staticmethod
+    def script(system: str, messages: list[dict[str, str]]) -> str:
+        lines = [system.strip(), "", "The conversation so far, then your turn:", ""]
+        for message in messages:
+            speaker = "Person" if message["role"] == "user" else "Robot"
+            lines += [f"[{speaker}]", message["content"].strip(), ""]
+        lines.append("[Robot]")
+        return "\n".join(lines)
+
+    async def stream(self, system: str, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+        try:
+            tokens = await self._client.text.achat(
+                self.script(system, messages), model=self.model, stream=True
+            )
+            async for token in tokens:
+                yield token
+        except LLMError:
+            raise
+        except Exception as exc:  # the SDK's own errors, a dropped connection, a timeout
+            raise LLMError(f"1min.ai chat failed: {exc}") from exc
+
+
 class OllamaLLM:
     """Local backend, through an Ollama server on this machine."""
 

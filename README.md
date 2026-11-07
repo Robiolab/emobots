@@ -45,16 +45,18 @@ export ONEMIN_API_KEY=...                                            # your 1min
 uv run --extra speech --with-editable ../1minai/python python -m affect_server --speech --stt onemin
 ```
 
-Add `--push-to-talk` to skip the always-on microphone and use the dashboard's **● Rec** button instead: click it, speak, click **■ Send**. The browser records, the server transcribes, and the sentence runs like a typed turn. It needs `--speech` (for the STT backend and the voice).
+With `--speech` the microphone starts off. The dashboard's **Escuchar** button switches it on and off (`--listen` starts it on). While it is on, a voice activity detector finds each utterance, sends it to the chosen STT backend, and the transcript runs like a typed turn. Anyone talking in the room counts as the person talking, so switch it off when you are not addressing the robot.
 
-To move an arm with the robot's emotion, point `--motions` at the `movements` project's recordings (one folder per recording, typed by its first emotion). When the robot enters `joy`, `sadness`, `anger` or `fear` it plays one random `happy`, `sad`, `angry` or `disgust` recording (the engine has no disgust label, so fear plays those) and holds the emotion for the length of the movement (about 8 s); it decays normally afterwards. Change the pairing with `--motion-map`. The dashboard shows an "Ejecutando acción" window while the arm moves.
+For a fast reply, `--llm onemin --llm-model gpt-5.4-nano` uses the 1min.ai chat API (about 1 to 2 s; the text of the conversation leaves this machine). It needs `ONEMIN_API_KEY` and `--with-editable ../1minai/python`.
+
+To move an arm with the robot's emotion, point `--motions` at the `movements` project's recordings (one folder per recording, typed by its first emotion). When the robot enters `joy`, `sadness`, `anger` or `fear` it plays one random `happy`, `sad`, `angry` or `disgust` recording (the engine has no disgust label, so fear plays those) and holds the emotion for the length of the movement (about 8 s); it decays normally afterwards. `interest` plays one random recording of any type, and no emotion repeats the recording it played last time. Only a new event starts a movement, so a fading emotion does not. Change the pairing with `--motion-map` (`any` means every type). The dashboard shows an "Ejecutando acción" window while the arm moves.
 
 ```sh
 uv run --extra speech --with-editable ../movements python -m affect_server --motions ../movements/recordings            # simulated arm
 uv run --extra speech --with-editable ../movements python -m affect_server --motions ../movements/recordings --arm real --arm-port /dev/ttyACM0   # the real arm
 ```
 
-The real arm is opt-in and moves for real: it goes to the recording's first pose, then plays at `--arm-speed 20`. Nothing checks joint limits, and `/api/stop` abandons the movement but cannot brake the arm, so keep the hardware e-stop within reach. Only one process may own the serial port.
+The real arm is opt-in and moves for real: it goes to the recording's first pose, then plays at `--arm-speed 20`. Nothing checks joint limits, and `/api/stop` abandons the movement but cannot brake the arm, so keep the hardware e-stop within reach. Only one process may own each serial port. To drive several arms together, list their ports separated by commas (`--arm-port /dev/ttyACM0,/dev/ttyACM1,/dev/ttyACM2`): each gets the same command at the same time, and one failing does not stop the others. `/dev/serial/by-id/...` paths keep each arm's name when the `ttyACM` numbers change.
 
 To talk out loud, install the speech models once, then start with `--speech`:
 

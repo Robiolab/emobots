@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import json
 import random
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -20,11 +21,13 @@ from typing import Any, Protocol
 
 # Engine label -> type of recording. The engine has no "disgust" label, so fear, the other
 # aversive withdrawal emotion, plays the disgust recordings.
+ANY = "any"  # a recording type that means "one at random from every type"
 DEFAULT_MOTION_MAP: dict[str, str] = {
     "joy": "happy",
     "sadness": "sad",
     "anger": "angry",
     "fear": "disgust",
+    "interest": ANY,
 }
 MIN_INTENSITY = 0.25  # a faint emotion does not move the arm
 DEFAULT_SPEED = 20  # the movements project tested playback at this speed on the real arm
@@ -61,6 +64,8 @@ class MotionLibrary:
         self.root = Path(root)
         self._rng = rng or random.Random()
         self._by_kind: dict[str, list[Path]] = {}
+        self._kind_of: dict[Path, str] = {}
+        self._last: dict[str, Path] = {}  # per requested type, to avoid an immediate repeat
         for folder in sorted(self.root.iterdir()) if self.root.is_dir() else []:
             meta_file = folder / "meta.json"
             if not (meta_file.exists() and (folder / "thetas.csv").exists()):
@@ -68,13 +73,21 @@ class MotionLibrary:
             emotions = json.loads(meta_file.read_text()).get("emotions") or []
             if emotions:
                 self._by_kind.setdefault(emotions[0], []).append(folder)
+                self._kind_of[folder] = emotions[0]
 
     def counts(self) -> dict[str, int]:
         return {kind: len(folders) for kind, folders in sorted(self._by_kind.items())}
 
     def pick(self, kind: str) -> Movement | None:
-        folders = self._by_kind.get(kind)
-        return self.load(self._rng.choice(folders), kind) if folders else None
+        """A random recording of this type (or of any type for ANY), never the one this
+        request got last time unless it is the only choice."""
+        folders = list(self._kind_of) if kind == ANY else self._by_kind.get(kind)
+        if not folders:
+            return None
+        fresh = [f for f in folders if f != self._last.get(kind)] or folders
+        chosen = self._rng.choice(fresh)
+        self._last[kind] = chosen
+        return self.load(chosen, self._kind_of[chosen])
 
     @staticmethod
     def load(folder: Path, kind: str) -> Movement:
@@ -158,8 +171,133 @@ class MotionPlayer:
         self._cancel.set()
 
 
+# myPalletizer 260 joint ranges in degrees (pymycobot.robot_info). The firmware silently
+# drops any command with a joint outside its range, and arms taught by hand can be moved
+# past it (theta2 below -2 in 26 of 41 recordings), so the arm would freeze mid-movement.
+PALLETIZER_260_LIMITS = ((-162.0, 162.0), (-2.0, 90.0), (-92.0, 60.0), (-180.0, 180.0))
+LIMIT_MARGIN = 0.2  # stay just inside the range: a value on the edge may be dropped too
+
+
+class LimitedArm:
+    """Keeps every command inside the arm's joint ranges, so the arm follows a movement as
+    closely as it can instead of ignoring the samples that leave its range."""
+
+    def __init__(
+        self,
+        arm: Any,
+        limits: Sequence[tuple[float, float]] = PALLETIZER_260_LIMITS,
+        margin: float = LIMIT_MARGIN,
+    ) -> None:
+        self.arm = arm
+        self.limits = tuple(limits)
+        self.margin = margin
+        self.clamped = 0  # commands that had to be brought back into range
+
+    def clamp(self, thetas: Sequence[float]) -> tuple[float, ...]:
+        return tuple(
+            min(max(float(t), low + self.margin), high - self.margin)
+            for t, (low, high) in zip(thetas, self.limits, strict=True)
+        )
+
+    def send_thetas(self, thetas: Sequence[float], speed: int = DEFAULT_SPEED) -> None:
+        safe = self.clamp(thetas)
+        if safe != tuple(float(t) for t in thetas):
+            self.clamped += 1
+        self.arm.send_thetas(safe, speed)
+
+    def get_thetas(self) -> Any:
+        return self.arm.get_thetas()
+
+    def lock(self) -> None:
+        self.arm.lock()
+
+    def disconnect(self) -> None:
+        self.arm.disconnect()
+
+
+class MultiArm:
+    """Several arms driven as one: every command goes to each, so they move together.
+
+    One arm failing (unplugged, a serial error) must not stop the others, so errors are
+    kept per port and only raised when no arm took the command.
+    """
+
+    def __init__(self, arms: Mapping[str, Any]) -> None:
+        if not arms:
+            raise ValueError("MultiArm needs at least one arm")
+        self.arms = dict(arms)
+        self.errors: dict[str, str] = {}
+        self.silent: list[str] = []  # ports that never answered, left out
+
+    def send_thetas(self, thetas: Sequence[float], speed: int = DEFAULT_SPEED) -> None:
+        delivered = 0
+        for name, arm in self.arms.items():
+            try:
+                arm.send_thetas(thetas, speed)
+                delivered += 1
+            except Exception as exc:
+                self.errors[name] = str(exc)
+        if not delivered:
+            raise RuntimeError(f"no arm took the command: {self.errors}")
+
+    @property
+    def clamped(self) -> int:
+        return sum(getattr(arm, "clamped", 0) for arm in self.arms.values())
+
+    def disconnect(self) -> None:
+        for arm in self.arms.values():
+            arm.disconnect()
+
+
+def split_ports(port: str) -> list[str]:
+    """`/dev/ttyACM0,/dev/ttyACM1` -> both. Duplicates are an error: two handles, one arm."""
+    ports = [p.strip() for p in port.split(",") if p.strip()]
+    if len(set(ports)) != len(ports):
+        raise ValueError(f"the same port is listed twice in {port!r}")
+    return ports
+
+
+def _answers(arm: Any, attempts: int, pause: float) -> bool:
+    """A powered-off or mismatched arm still opens its serial port, and sending to it never
+    fails, so ask it where it is: a live arm answers with its joint angles."""
+    for _ in range(attempts):
+        if arm.get_thetas() is not None:
+            return True
+        time.sleep(pause)
+    return False
+
+
+def open_arms(
+    ports: Sequence[str],
+    factory: Callable[[str], Any],
+    attempts: int = 4,
+    pause: float = 0.5,
+) -> tuple[dict[str, Any], list[str]]:
+    """Open every port; keep the arms that answer. Returns (arms, ports that stayed silent)."""
+    opened: dict[str, Any] = {}
+    silent: list[str] = []
+    try:
+        for path in ports:
+            arm = factory(path)
+            arm.connect()
+            arm.lock()
+            if _answers(arm, attempts, pause):
+                opened[path] = arm
+            else:
+                silent.append(path)
+                arm.disconnect()
+    except Exception as exc:
+        for arm in opened.values():
+            arm.disconnect()
+        raise RuntimeError(f"could not open the arm on {path}: {exc}") from exc
+    if not opened:
+        raise RuntimeError(f"no arm answered on {', '.join(ports)}: is it powered and flashed?")
+    return opened, silent
+
+
 def create_arm(kind: str, port: str = DEFAULT_PORT) -> Any:
-    """`mock` is a simulated arm; `real` opens the serial port of a myPalletizer."""
+    """`mock` is a simulated arm; `real` opens each serial port (comma separated) of a
+    myPalletizer, and drives all that answer together when there are several."""
     try:
         from palletizer_movements.connector import MockConnector, PalletizerConnector
     except ImportError as exc:
@@ -169,9 +307,14 @@ def create_arm(kind: str, port: str = DEFAULT_PORT) -> Any:
         ) from exc
     if kind == "mock":
         return MockConnector().connect()
-    if kind == "real":
-        arm = PalletizerConnector(port)
-        arm.connect()
-        arm.lock()
-        return arm
-    raise ValueError(f"unknown arm {kind!r}; use mock or real")
+    if kind != "real":
+        raise ValueError(f"unknown arm {kind!r}; use mock or real")
+    opened, silent = open_arms(split_ports(port), PalletizerConnector)
+    opened = {path: LimitedArm(arm) for path, arm in opened.items()}
+    for path in silent:
+        print(f"warning: no arm answered on {path}; it will not move", file=sys.stderr, flush=True)
+    print(f"arms ready: {', '.join(opened)}", file=sys.stderr, flush=True)
+    arm = opened[next(iter(opened))] if len(opened) == 1 else MultiArm(opened)
+    if isinstance(arm, MultiArm):
+        arm.silent = silent
+    return arm

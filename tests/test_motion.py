@@ -177,3 +177,145 @@ def test_motion_message_keeps_its_type_on_the_websocket(tmp_path, recordings):
                 assert message["movement"] == "happy" and message["seconds"] > 0
                 break
         assert "motion" in types
+
+
+def test_several_arms_move_together_and_one_failing_does_not_stop_the_rest():
+    from affect_server.motion import MultiArm, split_ports
+
+    class Broken:
+        def send_thetas(self, thetas, speed=50):
+            raise OSError("unplugged")
+
+    a, b = FakeArm(), FakeArm()
+    arms = MultiArm({"/dev/a": a, "/dev/broken": Broken(), "/dev/b": b})
+    arms.send_thetas((1, 2, 3, 4), 20)
+    assert a.sent == b.sent == [((1, 2, 3, 4), 20)]
+    assert "/dev/broken" in arms.errors
+    with pytest.raises(RuntimeError):
+        MultiArm({"/dev/broken": Broken()}).send_thetas((1, 2, 3, 4), 20)
+    assert split_ports("/dev/ttyACM0, /dev/ttyACM1") == ["/dev/ttyACM0", "/dev/ttyACM1"]
+    with pytest.raises(ValueError):
+        split_ports("/dev/ttyACM0,/dev/ttyACM0")
+
+
+def test_player_drives_a_multi_arm(recordings):
+    from affect_server.motion import MultiArm
+
+    a, b = FakeArm(), FakeArm()
+    player = MotionPlayer(MotionLibrary(recordings), MultiArm({"a": a, "b": b}))
+    player.start(player.choose("joy", 0.9))
+    deadline = time.monotonic() + 5
+    while player.playing and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert a.sent and a.sent == b.sent
+
+
+def test_motion_end_reports_an_arm_that_failed(tmp_path, recordings):
+    from affect_server.motion import MultiArm
+
+    class Broken:
+        def send_thetas(self, thetas, speed=50):
+            raise OSError("unplugged")
+
+    arms = MultiArm({"/dev/good": FakeArm(), "/dev/bad": Broken()})
+    app = create_app(log_dir=tmp_path / "logs", motions=recordings, arm=arms)
+    with TestClient(app) as client:
+        host = app.state.host
+        client.post("/api/say", json={"text": "gracias", "language": "es"})
+        wait_for(client, lambda b: host.motion.playing)
+        wait_for(client, lambda b: b["acting"] is None and not host.motion.playing)
+        log = client.get("/api/state").json()["log"]
+    from affect_core import read_log
+
+    ends = [r["data"] for r in read_log(log) if r["kind"] == "motion_end"]
+    assert ends and "/dev/bad" in ends[0]["arm_errors"] and ends[0]["error"] is None
+
+
+def test_open_arms_keeps_the_arms_that_answer_and_says_which_stayed_silent():
+    from affect_server.motion import open_arms
+
+    class Live:
+        def __init__(self, port, answer):
+            self.port, self.answer, self.closed = port, answer, False
+
+        def connect(self):
+            return self
+
+        def lock(self):
+            pass
+
+        def get_thetas(self):
+            return [1.0, 2.0, 3.0, 4.0] if self.answer else None
+
+        def disconnect(self):
+            self.closed = True
+
+    made = {}
+
+    def factory(port):
+        made[port] = Live(port, answer=port != "/dev/dead")
+        return made[port]
+
+    opened, silent = open_arms(["/dev/a", "/dev/dead", "/dev/b"], factory, attempts=2, pause=0)
+    assert list(opened) == ["/dev/a", "/dev/b"] and silent == ["/dev/dead"]
+    assert made["/dev/dead"].closed and not made["/dev/a"].closed
+    with pytest.raises(RuntimeError, match="no arm answered"):
+        open_arms(["/dev/dead"], factory, attempts=1, pause=0)
+
+
+def test_limited_arm_keeps_commands_inside_the_joint_ranges():
+    from affect_server.motion import LimitedArm
+
+    inner = FakeArm()
+    arm = LimitedArm(inner)
+    arm.send_thetas((10, 30, -20, 90), 20)  # already inside: untouched
+    arm.send_thetas((200, -4.48, 40.16, -300), 20)  # theta2 below -2 would be dropped
+    arm.send_thetas((0, 100, -95, 0), 20)
+    assert inner.sent[0][0] == (10.0, 30.0, -20.0, 90.0)
+    assert inner.sent[1][0] == (161.8, -1.8, 40.16, -179.8)
+    assert inner.sent[2][0] == (0.0, 89.8, -91.8, 0.0)
+    assert arm.clamped == 2 and all(speed == 20 for _, speed in inner.sent)
+
+
+def test_every_recording_pose_becomes_reachable_after_clamping():
+    import csv
+    from pathlib import Path
+
+    from affect_server.motion import PALLETIZER_260_LIMITS, LimitedArm
+
+    root = Path(__file__).resolve().parents[2] / "movements" / "recordings"
+    if not root.is_dir():
+        pytest.skip("the movements recordings are not next to this repo")
+    arm = LimitedArm(FakeArm())
+    for csv_file in root.glob("*/thetas.csv"):
+        for row in list(csv.reader(open(csv_file)))[1:]:
+            safe = arm.clamp([float(x) for x in row[1:]])
+            pairs = zip(safe, PALLETIZER_260_LIMITS, strict=True)
+            assert all(low <= v <= high for v, (low, high) in pairs)
+
+
+def test_interest_plays_any_recording_and_a_type_never_repeats_itself(recordings):
+    library = MotionLibrary(recordings, random.Random(3))
+    kinds = {library.pick("any").kind for _ in range(60)}
+    assert kinds == {"happy", "sad", "angry", "disgust"}  # the movement keeps its own type
+    last = None
+    for _ in range(40):
+        folder = library.pick("happy").folder
+        assert folder != last  # 3 happy recordings: always a different one
+        last = folder
+    player = MotionPlayer(library, FakeArm())
+    assert player.choose("interest", 0.5) is not None
+
+
+def test_a_fading_emotion_does_not_start_another_movement(tmp_path, recordings):
+    app = create_app(log_dir=tmp_path / "logs", motions=recordings, arm=FakeArm())
+    with TestClient(app) as client:
+        host = app.state.host
+        client.post("/api/say", json={"text": "gracias", "language": "es"})
+        wait_for(client, lambda b: host.motion.playing)
+        wait_for(client, lambda b: b["acting"] is None and not host.motion.playing)
+        time.sleep(1.0)  # joy now fades through other labels, none of them an event
+        log = client.get("/api/state").json()["log"]
+    from affect_core import read_log
+
+    assert [r["kind"] for r in read_log(log)].count("motion") == 1

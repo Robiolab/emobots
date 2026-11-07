@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import logging
 import os
 import re
 import site
@@ -148,6 +149,85 @@ class WhisperSTT:
                 language = max(allowed)[1] if allowed else self.languages[0]
             text = self._run(audio, language)[0]
         return Transcript(_drop_hallucination(text), language)
+
+
+_SPANISH_HINTS = re.compile(
+    r"[ñ¿¡áéíóú]|\b(el|la|los|las|de|que|y|en|un|una|es|por|con|para|no|me|te|se|mi|hola|qué|cómo)\b",
+    re.IGNORECASE,
+)
+_ENGLISH_HINTS = re.compile(
+    r"\b(the|and|is|are|you|your|what|how|that|this|with|for|have|do|not|my|hello|hi)\b",
+    re.IGNORECASE,
+)
+
+
+def _guess_language(text: str, fallback: str) -> str:
+    """The API returns text only, so pick between the supported languages from the words."""
+    spanish = len(_SPANISH_HINTS.findall(text))
+    english = len(_ENGLISH_HINTS.findall(text))
+    if spanish == english:
+        return fallback
+    return "es" if spanish > english else "en"
+
+
+class OneMinSTT:
+    """Transcribes each utterance with the 1min.ai speech-to-text API.
+
+    Unlike WhisperSTT the audio leaves this machine, and it is a batch HTTP call (upload,
+    transcribe, poll), so it is slower than local Whisper. Needs the `onemin` SDK and the
+    ONEMIN_API_KEY environment variable.
+    """
+
+    device = "1min.ai"
+
+    def __init__(
+        self,
+        model: str | None = None,
+        languages: tuple[str, ...] = STT_LANGUAGES,
+        client: Any = None,
+    ) -> None:
+        if client is None:
+            try:
+                from onemin import OneMinClient
+            except ImportError as exc:
+                raise RuntimeError(
+                    "the onemin SDK is not installed; run with "
+                    "`uv run --with-editable <path to 1minai>/python ...`"
+                ) from exc
+            client = OneMinClient()
+        self._client = client
+        self._model = model
+        self.languages = languages
+
+    @staticmethod
+    def _wav(audio: np.ndarray) -> bytes:
+        import io
+        import wave
+
+        pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2")
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(pcm.tobytes())
+        return buffer.getvalue()
+
+    def transcribe(self, audio: np.ndarray, prior_language: str | None = None) -> Transcript:
+        fallback = prior_language if prior_language in self.languages else self.languages[0]
+        options: dict[str, Any] = {}
+        if self._model:
+            options["model"] = self._model
+        # As with local Whisper, a short clip is too little to detect the language from.
+        if prior_language in self.languages and len(audio) / 16000 < SHORT_CLIP_S:
+            options["language"] = prior_language
+        try:
+            result = self._client.audio.transcribe(("utterance.wav", self._wav(audio)), **options)
+        except Exception as exc:  # a network or API failure should drop the turn, not the server
+            logging.getLogger(__name__).warning("1min.ai transcription failed: %s", exc)
+            return Transcript("", fallback)
+        text = _drop_hallucination((result.content or "").strip())
+        return Transcript(text, _guess_language(text, fallback))
 
 
 def shift_pitch(samples: np.ndarray, semitones: float) -> np.ndarray:

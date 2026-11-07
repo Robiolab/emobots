@@ -22,13 +22,39 @@ uv run pytest                       # no models, GPU or network needed
 uv run python -m affect_server      # dashboard at http://127.0.0.1:8765, typed chat
 ```
 
-That default uses `scripted`, a keyword stand-in for the LLM, so everything runs offline. To use a real model:
+That default uses `scripted`, a keyword stand-in for the LLM, so everything runs offline.
+
+If you have ROS 2 sourced in your shell, `pytest` can fail at startup with `No module named 'lark'`: ROS puts its own pytest plugins on `PYTHONPATH`. Run it without that variable:
+
+```sh
+env -u PYTHONPATH uv run pytest
+```
+
+To use a real model:
 
 ```sh
 uv run python -m affect_server --llm ollama --llm-model qwen2.5:7b   # local, the tested one
 uv sync --extra claude                                               # then set ANTHROPIC_API_KEY
 uv run --extra claude python -m affect_server --llm claude           # cloud, text only
 ```
+
+To use the 1min.ai speech-to-text API as the voice input instead of local Whisper (the audio leaves this machine, and each utterance is a batch request, so it is slower):
+
+```sh
+export ONEMIN_API_KEY=...                                            # your 1min.ai key
+uv run --extra speech --with-editable ../1minai/python python -m affect_server --speech --stt onemin
+```
+
+Add `--push-to-talk` to skip the always-on microphone and use the dashboard's **● Rec** button instead: click it, speak, click **■ Send**. The browser records, the server transcribes, and the sentence runs like a typed turn. It needs `--speech` (for the STT backend and the voice).
+
+To move an arm with the robot's emotion, point `--motions` at the `movements` project's recordings (one folder per recording, typed by its first emotion). When the robot enters `joy`, `sadness`, `anger` or `fear` it plays one random `happy`, `sad`, `angry` or `disgust` recording (the engine has no disgust label, so fear plays those) and holds the emotion for the length of the movement (about 8 s); it decays normally afterwards. Change the pairing with `--motion-map`. The dashboard shows an "Ejecutando acción" window while the arm moves.
+
+```sh
+uv run --extra speech --with-editable ../movements python -m affect_server --motions ../movements/recordings            # simulated arm
+uv run --extra speech --with-editable ../movements python -m affect_server --motions ../movements/recordings --arm real --arm-port /dev/ttyACM0   # the real arm
+```
+
+The real arm is opt-in and moves for real: it goes to the recording's first pose, then plays at `--arm-speed 20`. Nothing checks joint limits, and `/api/stop` abandons the movement but cannot brake the arm, so keep the hardware e-stop within reach. Only one process may own the serial port.
 
 To talk out loud, install the speech models once, then start with `--speech`:
 

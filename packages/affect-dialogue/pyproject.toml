@@ -19,6 +19,7 @@ ollama = "affect_dialogue.llm:OllamaLLM"
 
 [project.entry-points."affect.stt"]
 whisper = "affect_dialogue.speech:WhisperSTT"
+onemin = "affect_dialogue.speech:OneMinSTT"
 
 [project.entry-points."affect.tts"]
 piper = "affect_dialogue.speech:PiperTTS"

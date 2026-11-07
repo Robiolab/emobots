@@ -46,6 +46,19 @@ h1 { font-size: 18px; font-weight: 600; margin: 0; }
 .say select { width: auto; flex: none; }
 .say input { flex: 1; min-width: 0; }
 .say button { flex: none; }
+.say button.recording { border-color: var(--critical); color: var(--critical); }
+#acting { position: fixed; right: 16px; bottom: 16px; z-index: 10; width: min(300px, calc(100vw - 32px));
+  background: var(--surface); border: 1px solid var(--axis); border-radius: 8px; padding: 10px 12px;
+  box-shadow: 0 4px 18px rgba(0,0,0,.25); }
+#acting[hidden] { display: none; }
+#acting .title { font-weight: 600; display: flex; align-items: center; gap: 8px; }
+#acting .title::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--a);
+  animation: pulse 1s ease-in-out infinite; }
+#acting .detail { color: var(--ink-2); font-size: 12.5px; margin-top: 2px; font-variant-numeric: tabular-nums; }
+#acting .bar { height: 4px; background: var(--wash); border-radius: 2px; margin-top: 8px; overflow: hidden; }
+#acting .bar i { display: block; height: 100%; width: 0; background: var(--a); }
+@keyframes pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { #acting .title::before { animation: none; } }
 main { display: grid; gap: 12px; padding: 8px 16px 32px; max-width: 1240px; margin: 0 auto;
   grid-template-columns: minmax(0, 1fr) minmax(0, 360px); align-items: start; }
 @media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); } }
@@ -98,6 +111,11 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; margin-
 </style>
 </head>
 <body>
+<div id="acting" role="status" aria-live="polite" hidden>
+  <div class="title">Ejecutando acción</div>
+  <div class="detail" id="actingDetail"></div>
+  <div class="bar"><i id="actingBar"></i></div>
+</div>
 <header>
   <h1>Affect Dashboard</h1>
   <span class="meta" id="session">Connecting</span>
@@ -123,6 +141,7 @@ details summary { cursor: pointer; color: var(--ink-2); font-size: 13px; margin-
       <form id="sayForm" class="say">
         <select id="sayLang" aria-label="Language"><option value="es">ES</option><option value="en">EN</option></select>
         <input type="text" id="sayText" placeholder="Type something to the robot" maxlength="2000" autocomplete="off" aria-label="Message to the robot">
+        <button type="button" id="rec" disabled title="Record your voice, click again to send">● Rec</button>
         <button type="submit">Say</button>
       </form>
       <p class="hint" id="talkHint"></p>
@@ -463,9 +482,14 @@ function onHello(m) {
   $("talk").replaceChildren();
   m.talk.forEach(addTalk);
   showLatency(m.latency);
-  $("talkHint").textContent = m.voice
-    ? "Listening on the microphone. Typing works too."
-    : "Typed only: start the server with --speech to use the microphone.";
+  if (m.acting) showActing(m.acting, m.acting.remaining); else hideActing();
+  $("rec").disabled = !m.voice;
+  serverRecorder = !!m.recorder && ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname);
+  $("talkHint").textContent = !m.voice
+    ? "Typed only: start the server with --speech to use the microphone."
+    : m.mic
+      ? "Listening on the microphone. Typing works too."
+      : "Click ● Rec, speak, then click again to send. Typing works too.";
   onState({ ...m.state, expression: m.expression });
 }
 let tickRate = 30;
@@ -494,6 +518,8 @@ function connect() {
     else if (m.type === "event") { marks.push({ t: m.event.t, cause: m.event.cause }); addLog(m); }
     else if (["heard", "reply", "llm_error", "interrupted"].includes(m.type)) addTalk(m);
     else if (m.type === "turn") showLatency(m.summary);
+    else if (m.type === "motion") showActing(m, m.seconds);
+    else if (m.type === "motion_end") hideActing();
   };
 }
 new ResizeObserver(() => { dirty = true; }).observe($("chartBox"));
@@ -524,6 +550,164 @@ $("sayForm").addEventListener("submit", e => {
   if (!text) return;
   post("/api/say", { text, language: $("sayLang").value });
   $("sayText").value = "";
+});
+
+// ---- the arm is moving: a small window while a recorded action plays ----
+const EMOTION_ES = { joy: "alegría", sadness: "tristeza", anger: "enojo", fear: "miedo" };
+let actingTimer = null;
+function hideActing() {
+  clearInterval(actingTimer);
+  $("acting").hidden = true;
+}
+function showActing(info, remaining) {
+  clearInterval(actingTimer);
+  const total = info.seconds || remaining || 1;
+  const end = performance.now() + remaining * 1000;
+  const tick = () => {
+    const left = Math.max(0, (end - performance.now()) / 1000);
+    $("actingDetail").textContent =
+      `${EMOTION_ES[info.emotion] || info.emotion} · ${info.movement} · ${left.toFixed(0)} s`;
+    $("actingBar").style.width = `${100 * (1 - left / total)}%`;
+    if (left <= 0) hideActing();  // the server's end message normally comes first
+  };
+  $("acting").hidden = false;
+  tick();
+  actingTimer = setInterval(tick, 200);
+}
+
+// ---- record button: capture the microphone here, transcribe on the server ----
+const REC_RATE = 16000;
+let recording = null;
+// On the machine running the server, it records its own microphone: no browser permission.
+let serverRecorder = false;
+let serverRecording = false;
+
+async function toggleServerRecording() {
+  if (!serverRecording) {
+    const res = await fetch("/api/record/start", { method: "POST" });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`);
+    serverRecording = true;
+    $("rec").textContent = "■ Send";
+    $("rec").classList.add("recording");
+    $("talkHint").textContent = "Recording from this computer's microphone. Speak, then click ■ Send.";
+    return;
+  }
+  serverRecording = false;
+  $("rec").classList.remove("recording");
+  $("rec").textContent = "… Sending";
+  $("rec").disabled = true;
+  $("talkHint").textContent = "Transcribing.";
+  try {
+    const res = await fetch(`/api/record/stop?language=${encodeURIComponent($("sayLang").value)}`, { method: "POST" });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    $("talkHint").textContent = body.text ? `Heard: ${body.text}` : "No words heard. Try again.";
+  } finally {
+    $("rec").textContent = "● Rec";
+    $("rec").disabled = false;
+  }
+}
+
+function toPcm16(chunks, fromRate) {
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const all = new Float32Array(total);
+  let at = 0;
+  for (const c of chunks) { all.set(c, at); at += c.length; }
+  const ratio = fromRate / REC_RATE;
+  const out = new Int16Array(Math.floor(total / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const a = Math.floor(i * ratio), b = Math.max(a + 1, Math.floor((i + 1) * ratio));
+    let sum = 0;
+    for (let j = a; j < b; j++) sum += all[j];
+    out[i] = Math.max(-1, Math.min(1, sum / (b - a))) * 32767;
+  }
+  return out;
+}
+
+const MIC_PROMPT_TIMEOUT_MS = 12000;
+
+async function openMicrophone() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error("this page needs http://127.0.0.1 or https to use the microphone");
+  }
+  $("talkHint").textContent = "Waiting for the browser to allow the microphone. Check the prompt near the address bar.";
+  const request = navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(
+      "no answer to the microphone prompt. Click the icon left of the address bar, allow the microphone, and try again")), MIC_PROMPT_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } catch (err) {
+    // If the person allows it after the timeout, release the microphone again.
+    request.then(s => s.getTracks().forEach(t => t.stop()), () => {});
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function startRecording() {
+  const stream = await openMicrophone();
+  const ctx = new AudioContext();
+  await ctx.resume();
+  const source = ctx.createMediaStreamSource(stream);
+  const node = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  node.onaudioprocess = e => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  source.connect(node);
+  node.connect(ctx.destination);
+  recording = { stream, ctx, source, node, chunks };
+  $("rec").textContent = "■ Send";
+  $("rec").classList.add("recording");
+  $("talkHint").textContent = "Recording. Speak, then click ■ Send.";
+}
+
+async function stopRecording() {
+  const { stream, ctx, source, node, chunks } = recording;
+  recording = null;
+  const rate = ctx.sampleRate;
+  node.disconnect(); source.disconnect();
+  stream.getTracks().forEach(t => t.stop());
+  await ctx.close();
+  $("rec").classList.remove("recording");
+  $("rec").textContent = "… Sending";
+  $("rec").disabled = true;
+  $("talkHint").textContent = "Transcribing.";
+  try {
+    const pcm = toPcm16(chunks, rate);
+    const lang = encodeURIComponent($("sayLang").value);
+    const res = await fetch(`/api/listen?language=${lang}`, {
+      method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: pcm.buffer,
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    $("talkHint").textContent = body.text ? `Heard: ${body.text}` : "No words heard. Try again.";
+  } catch (err) {
+    $("talkHint").textContent = `Could not transcribe: ${err.message}`;
+  } finally {
+    $("rec").textContent = "● Rec";
+    $("rec").disabled = false;
+  }
+}
+
+$("rec").addEventListener("click", async () => {
+  try {
+    if (serverRecorder) await toggleServerRecording();
+    else await (recording ? stopRecording() : startRecording());
+  } catch (err) {
+    recording = null;
+    serverRecording = false;
+    $("rec").disabled = false;
+    $("rec").classList.remove("recording");
+    $("rec").textContent = "● Rec";
+    $("talkHint").textContent = err.name === "NotFoundError"
+      ? "No microphone found. Plug one in or pick it in the system sound settings."
+      : err.name === "NotAllowedError"
+        ? "Microphone blocked. Click the icon left of the address bar, allow it, and reload."
+        : `Microphone unavailable: ${err.message}`;
+  }
 });
 
 const SCALES = [["relevance", 0, 1, 0.7], ["congruence", -1, 1, 0.5], ["novelty", -1, 1, 0], ["control", -1, 1, 0], ["norm", -1, 1, 0]];
